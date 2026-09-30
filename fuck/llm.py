@@ -22,6 +22,9 @@ history, changes system configuration, or is otherwise hard to undo.
 - If a <user_hint> is given, it describes what the user wants and takes priority.
 - "explanation": one to three short sentences of plain text (no markdown), \
 written in {lang}.
+
+Reply with only a JSON object: \
+{{"explanation": string, "command": string, "dangerous": boolean}}
 """
 
 SCHEMA = {
@@ -84,9 +87,22 @@ def ask(
         raise LLMError("the model declined to answer")
     if resp.stop_reason == "max_tokens":
         raise LLMError("the response was cut off (max_tokens)")
-    text = next((b.text for b in resp.content if b.type == "text"), "")
+    return parse(next((b.text for b in resp.content if b.type == "text"), ""))
+
+
+def parse(text: str) -> Fix:
+    # Structured outputs guarantee bare JSON, but proxies may drop output_config,
+    # leaving the model free to wrap the object in a markdown fence or prose.
+    start, end = text.find("{"), text.rfind("}")
     try:
-        data = json.loads(text)
+        data = json.loads(text[start : end + 1]) if start != -1 else None
     except json.JSONDecodeError:
+        data = None
+    if not (
+        isinstance(data, dict)
+        and isinstance(data.get("explanation"), str)
+        and isinstance(data.get("command"), str)
+    ):
         raise LLMError(f"unexpected response: {text[:200]}")
-    return Fix(data["explanation"], data["command"].strip(), data["dangerous"])
+    # without an explicit verdict, err on the side of asking
+    return Fix(data["explanation"], data["command"].strip(), data.get("dangerous") is not False)
